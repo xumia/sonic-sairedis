@@ -101,10 +101,17 @@ config_syncd_marvell()
     [ -e /dev/net/tun ] || ( mkdir -p /dev/net && mknod /dev/net/tun c 10 200 )
 }
 
+config_syncd_barefoot()
+{
+    export ONIE_PLATFORM=`grep platform /etc/machine.conf | awk 'BEGIN { FS = "=" } ; { print $2 }'`
+    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/bfn/install/lib/platform/$ONIE_PLATFORM:/opt/bfn/install/lib:/opt/bfn/install/lib/tofinopd/switch
+     . /opt/bfn/install/bin/dma_setup.sh
+     export LD_PRELOAD=libswitchapi.so:libswitchsai.so:libpd.so:libpdcli.so:libdriver.so:libbfsys.so
+}
+
 config_syncd_nephos()
 {
     CMD_ARGS+=" -p $HWSKU_DIR/sai.profile"
-
     if [ $FAST_REBOOT == "yes" ]; then
         CMD_ARGS+=" -t fast"
     fi
@@ -122,6 +129,8 @@ config_syncd()
         config_syncd_centec
     elif [ "$SONIC_ASIC_TYPE" == "marvell" ]; then
         config_syncd_marvell
+     elif [ "$SONIC_ASIC_TYPE" == "barefoot" ]; then
+         config_syncd_barefoot
     elif [ "$SONIC_ASIC_TYPE" == "nephos" ]; then
         config_syncd_nephos
     else
