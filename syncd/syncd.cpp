@@ -2265,7 +2265,6 @@ sai_status_t processFdbFlush(
     SWSS_LOG_ENTER();
 
     const std::string &key = kfvKey(kco);
-    const std::string &str_object_type = key.substr(0, key.find(":"));
     const std::string &str_object_id = key.substr(key.find(":") + 1);
 
     sai_object_id_t switch_vid;
@@ -2917,7 +2916,17 @@ void handlePortMap(const std::string& portMapFile)
 }
 #endif // SAITHRIFT
 
-bool handleRestartQuery(swss::NotificationConsumer &restartQuery)
+typedef enum _syncd_restart_type_t
+{
+    SYNCD_RESTART_TYPE_COLD,
+
+    SYNCD_RESTART_TYPE_WARM,
+
+    SYNCD_RESTART_TYPE_FAST,
+
+} syncd_restart_type_t;
+
+syncd_restart_type_t handleRestartQuery(swss::NotificationConsumer &restartQuery)
 {
     SWSS_LOG_ENTER();
 
@@ -2932,17 +2941,23 @@ bool handleRestartQuery(swss::NotificationConsumer &restartQuery)
     if (op == "COLD")
     {
         SWSS_LOG_NOTICE("received COLD switch shutdown event");
-        return false;
+        return SYNCD_RESTART_TYPE_COLD;
     }
 
     if (op == "WARM")
     {
         SWSS_LOG_NOTICE("received WARM switch shutdown event");
-        return true;
+        return SYNCD_RESTART_TYPE_WARM;
+    }
+
+    if (op == "FAST")
+    {
+        SWSS_LOG_NOTICE("received FAST switch shutdown event");
+        return SYNCD_RESTART_TYPE_FAST;
     }
 
     SWSS_LOG_WARN("received '%s' unknown switch shutdown event, assuming COLD", op.c_str());
-    return false;
+    return SYNCD_RESTART_TYPE_COLD;
 }
 
 bool isVeryFirstRun()
@@ -3036,6 +3051,21 @@ void set_sai_api_loglevel()
     for (uint32_t idx = 1; idx < sai_metadata_enum_sai_api_t.valuescount; ++idx)
     {
         swss::Logger::linkToDb(sai_metadata_enum_sai_api_t.valuesnames[idx], saiLoglevelNotify, "SAI_LOG_LEVEL_NOTICE");
+    }
+}
+
+void set_sai_api_log_min_prio(const std::string &prioStr)
+{
+    SWSS_LOG_ENTER();
+
+    /*
+     * We start from 1 since 0 is SAI_API_UNSPECIFIED.
+     */
+
+    for (uint32_t idx = 1; idx < sai_metadata_enum_sai_api_t.valuescount; ++idx)
+    {
+        const auto& api_name = sai_metadata_enum_sai_api_t.valuesnames[idx];
+        saiLoglevelNotify(api_name, prioStr);
     }
 }
 
@@ -3318,7 +3348,7 @@ int syncd_main(int argc, char **argv)
 
     SWSS_LOG_NOTICE("syncd started");
 
-    bool warmRestartHint = false;
+    syncd_restart_type_t restartType = SYNCD_RESTART_TYPE_COLD;
 
     try
     {
@@ -3343,9 +3373,7 @@ int syncd_main(int argc, char **argv)
         {
             swss::Selectable *sel = NULL;
 
-            int fd;
-
-            int result = s.select(&sel, &fd);
+            int result = s.select(&sel);
 
             if (sel == restartQuery.get())
             {
@@ -3357,7 +3385,7 @@ int syncd_main(int argc, char **argv)
                  * lead to unable to find some objects.
                  */
 
-                warmRestartHint = handleRestartQuery(*restartQuery);
+                restartType = handleRestartQuery(*restartQuery);
                 break;
             }
             else if (sel == flexCounter.get())
@@ -3381,7 +3409,7 @@ int syncd_main(int argc, char **argv)
         exit_and_notify(EXIT_FAILURE);
     }
 
-    if (warmRestartHint)
+    if (restartType == SYNCD_RESTART_TYPE_WARM)
     {
         const char *warmBootWriteFile = profile_get_value(0, SAI_KEY_WARM_BOOT_WRITE_FILE);
 
@@ -3391,13 +3419,35 @@ int syncd_main(int argc, char **argv)
         {
             SWSS_LOG_WARN("user requested warm shutdown but warmBootWriteFile is not specified, forcing cold shutdown");
 
-            warmRestartHint = false;
+            restartType = SYNCD_RESTART_TYPE_COLD;
         }
     }
 
     SWSS_LOG_NOTICE("Removing the switch gSwitchId=0x%lx", gSwitchId);
     sai_switch_api_t *sai_switch_api = NULL;
     sai_api_query(SAI_API_SWITCH, (void**)&sai_switch_api);
+
+#ifdef SAI_SWITCH_ATTR_UNINIT_DATA_PLANE_ON_REMOVAL
+
+    if (restartType == SYNCD_RESTART_TYPE_FAST)
+    {
+        SWSS_LOG_NOTICE("Fast Reboot requested, keeping data plane running");
+
+        sai_attribute_t attr;
+
+        attr.id = SAI_SWITCH_ATTR_UNINIT_DATA_PLANE_ON_REMOVAL;
+        attr.value.booldata = false;
+
+        status = sai_switch_api->set_switch_attribute(gSwitchId, &attr);
+
+        if (status != SAI_STATUS_SUCCESS)
+        {
+            SWSS_LOG_ERROR("Failed to set SAI_SWITCH_ATTR_UNINIT_DATA_PLANE_ON_REMOVAL=false: %s",
+                    sai_serialize_status(status).c_str());
+        }
+    }
+
+#endif
 
     FlexCounter::removeAllCounters();
 
@@ -3407,7 +3457,8 @@ int syncd_main(int argc, char **argv)
     status = sai_switch_api->remove_switch(gSwitchId);
     if (status != SAI_STATUS_SUCCESS)
     {
-        SWSS_LOG_NOTICE("Can't delete a switch. gSwitchId=0x%lx status=0xx", gSwitchId, status);
+        SWSS_LOG_NOTICE("Can't delete a switch. gSwitchId=0x%lx status=%s", gSwitchId,
+                sai_serialize_status(status).c_str());
     }
 
     SWSS_LOG_NOTICE("calling api uninitialize");
