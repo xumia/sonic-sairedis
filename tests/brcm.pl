@@ -419,8 +419,21 @@ sub test_acl_mask
     for (1..8) { play "acl_mask.rec", 0; }
 }
 
+sub test_acl_counter
+{
+    fresh_start;
+
+    play "acl_counter.rec";
+    play "acl_counter.rec", 0;
+    play "acl_counter.rec", 0;
+    play "acl_counter.rec", 0;
+    play "acl_counter.rec", 0;
+    play "acl_counter.rec", 0;
+}
+
 # RUN TESTS
 
+test_acl_counter;
 test_acl_mask;
 test_empty_lag_buffer_acl;
 test_brcm_config_acl;
