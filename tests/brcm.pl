@@ -431,8 +431,20 @@ sub test_acl_counter
     play "acl_counter.rec", 0;
 }
 
-# RUN TESTS
+sub test_acl_counter2
+{
+    fresh_start;
 
+    play "acl_counter2.rec";
+    play "acl_counter2.rec", 0;
+    play "acl_counter2.rec", 0;
+    play "acl_counter2.rec", 0;
+    play "acl_counter2.rec", 0;
+    play "acl_counter2.rec", 0;
+}
+
+# RUN TESTS
+test_acl_counter2;
 test_acl_counter;
 test_acl_mask;
 test_empty_lag_buffer_acl;
