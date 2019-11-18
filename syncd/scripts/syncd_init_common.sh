@@ -31,7 +31,7 @@ case "$(cat /proc/cmdline)" in
     fi
     ;;
   *SONIC_BOOT_TYPE=fast*|*fast-reboot*)
-     FAST_REBOOT='yes'
+    FAST_REBOOT=$(awk '{ if ($1 <= 180) print "yes"; else print "no" }' /proc/uptime)
     ;;
   *)
      FAST_REBOOT='no'
