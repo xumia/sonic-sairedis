@@ -41,6 +41,18 @@ AC_ARG_WITH(swss-common-lib,
                           prefix where swss-common libraries are installed],
 [AC_SUBST(LDFLAGS, "$LDFLAGS -L${withval}")])
 
+AC_ARG_ENABLE(syncd,
+[  --enable-syncd          build syncd],
+[case "${enableval}" in
+   yes) syncd=true ;;
+   no)  syncd=false ;;
+   *) AC_MSG_ERROR(bad value ${enableval} for --enable-syncd) ;;
+esac],[syncd=true])
+AM_CONDITIONAL(SYNCD, test x$syncd = xtrue)
+AM_COND_IF([SYNCD], [
+        AM_COND_IF([SAIVS], [], [AC_CHECK_LIB([sai], [main], [AC_MSG_NOTICE(libsai found)], [AC_MSG_ERROR(libsai is required for syncd)])
+])])
+
 AC_ARG_ENABLE(rpcserver,
 [  --enable-rpcserver      compile with thrift rpcserver included],
 [case "${enableval}" in
