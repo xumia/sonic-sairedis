@@ -1,1 +1,7 @@
-SUBDIRS = meta lib vslib syncd saiplayer saidump saidiscovery tests saisdkdump
+SUBDIRS = meta lib vslib
+
+if SYNCD
+SUBDIRS += syncd saiplayer saidump saidiscovery saisdkdump tests
+endif
+
+ACLOCAL_AMFLAGS = -I m4
