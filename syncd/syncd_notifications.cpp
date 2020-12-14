@@ -66,6 +66,171 @@ sai_fdb_entry_type_t getFdbEntryType(
     return (sai_fdb_entry_type_t)ret;
 }
 
+void redisFlushFdbEntries(
+        _In_ const sai_fdb_event_notification_data_t *fdb)
+{
+    SWSS_LOG_ENTER();
+
+    if (fdb->event_type != SAI_FDB_EVENT_FLUSHED)
+    {
+        SWSS_LOG_THROW("expected event_type == SAI_FDB_EVENT_FLUSHED");
+    }
+
+    sai_object_id_t bv_id = fdb->fdb_entry.bv_id;
+    sai_object_id_t port_oid = 0;
+
+    sai_fdb_entry_type_t entryType = SAI_FDB_ENTRY_TYPE_DYNAMIC;
+
+    for (uint32_t i = 0; i < fdb->attr_count; i++)
+    {
+        if (fdb->attr[i].id == SAI_FDB_ENTRY_ATTR_BRIDGE_PORT_ID)
+        {
+            port_oid = fdb->attr[i].value.oid;
+        }
+
+        if (fdb->attr[i].id == SAI_FDB_ENTRY_ATTR_TYPE)
+        {
+            entryType = (sai_fdb_entry_type_t)fdb->attr[i].value.s32;
+        }
+    }
+
+    std::string strEntryType =
+        (entryType == SAI_FDB_ENTRY_TYPE_DYNAMIC)
+        ? "SAI_FDB_ENTRY_TYPE_DYNAMIC"
+        : "SAI_FDB_ENTRY_TYPE_STATIC";
+
+
+    if (!port_oid && !bv_id)
+    {
+        /* we got a flush all fdb event here */
+        /* example of a flush all fdb event   */
+        /*
+           [{
+           "fdb_entry":"{
+           \"bv_id\":\"oid:0x0\",
+           \"mac\":\"00:00:00:00:00:00\",
+           \"switch_id\":\"oid:0x21000000000000\"}",
+           "fdb_event":"SAI_FDB_EVENT_FLUSHED",
+           "list":[
+           {"id":"SAI_FDB_ENTRY_ATTR_BRIDGE_PORT_ID","value":"oid:0x0"},
+           {"id":"SAI_FDB_ENTRY_ATTR_TYPE","value":"SAI_FDB_ENTRY_TYPE_DYNAMIC"},
+           {"id":"SAI_FDB_ENTRY_ATTR_PACKET_ACTION","value":"SAI_PACKET_ACTION_FORWARD"}
+           ]
+           }]
+           */
+        SWSS_LOG_NOTICE("received a flush all fdb event");
+        std::string pattern = ASIC_STATE_TABLE + std::string(":SAI_OBJECT_TYPE_FDB_ENTRY:*");
+        for (const auto &fdbkey: g_redisClient->keys(pattern))
+        {
+            /* we only remove dynamic fdb entries here, static fdb entries need to be deleted manually by user instead of flush */
+            auto pEntryType = g_redisClient->hget(fdbkey, "SAI_FDB_ENTRY_ATTR_TYPE");
+
+            if (pEntryType != NULL && *pEntryType == strEntryType)
+            {
+                SWSS_LOG_DEBUG("remove fdb entry %s for SAI_FDB_EVENT_FLUSHED",fdbkey.c_str());
+                g_redisClient->del(fdbkey);
+            }
+        }
+    }
+    else if (port_oid && !bv_id)
+    {
+        /*
+           [{
+           "fdb_entry":"{
+           \"bv_id\":\"oid:0x0\",
+           \"mac\":\"00:00:00:00:00:00\",
+           \"switch_id\":\"oid:0x21000000000000\"}",
+           "fdb_event":"SAI_FDB_EVENT_FLUSHED",
+           "list":[
+           {"id":"SAI_FDB_ENTRY_ATTR_BRIDGE_PORT_ID","value":"oid:0x3a0000000009cf"},
+           {"id":"SAI_FDB_ENTRY_ATTR_TYPE","value":"SAI_FDB_ENTRY_TYPE_DYNAMIC"},
+           {"id":"SAI_FDB_ENTRY_ATTR_PACKET_ACTION","value":"SAI_PACKET_ACTION_FORWARD"}
+           ]
+           }]
+           */
+        SWSS_LOG_NOTICE("received a flush fdb event, port_oid = 0x%" PRIx64 ", bv_id = 0x%" PRIx64, port_oid, bv_id);
+
+        auto strBridgePortId = sai_serialize_object_id(port_oid);
+
+        std::string pattern = ASIC_STATE_TABLE + std::string(":SAI_OBJECT_TYPE_FDB_ENTRY:*");
+        for (const auto &fdbkey: g_redisClient->keys(pattern))
+        {
+            /* we only remove dynamic fdb entries here, static fdb entries need to be deleted manually by user instead of flush */
+            auto pEntryType = g_redisClient->hget(fdbkey, "SAI_FDB_ENTRY_ATTR_TYPE");
+
+            if (pEntryType && *pEntryType == strEntryType)
+            {
+                auto bp = g_redisClient->hget(fdbkey, "SAI_FDB_ENTRY_ATTR_BRIDGE_PORT_ID");
+
+                if (bp && *bp == strBridgePortId)
+                {
+                    SWSS_LOG_DEBUG("remove fdb entry %s for SAI_FDB_EVENT_FLUSHED",fdbkey.c_str());
+                    g_redisClient->del(fdbkey);
+                }
+            }
+        }
+    }
+    else if (!port_oid && bv_id)
+    {
+        /*
+           [{
+           "fdb_entry":"{
+           \"bridge_id\":\"oid:0x23000000000000\",
+           \"mac\":\"00:00:00:00:00:00\",
+           \"switch_id\":\"oid:0x21000000000000\"}",
+           "fdb_event":"SAI_FDB_EVENT_FLUSHED",
+           "list":[
+           {"id":"SAI_FDB_ENTRY_ATTR_BRIDGE_PORT_ID","value":"oid:0x0"},
+           {"id":"SAI_FDB_ENTRY_ATTR_TYPE","value":"SAI_FDB_ENTRY_TYPE_DYNAMIC"},
+           {"id":"SAI_FDB_ENTRY_ATTR_PACKET_ACTION","value":"SAI_PACKET_ACTION_FORWARD"}
+           ]
+           }]
+           */
+        SWSS_LOG_NOTICE("received a flush fdb event, port_oid = 0x%" PRIx64 ", bv_id = 0x%" PRIx64, port_oid, bv_id);
+
+        auto strBridgeVlanId = sai_serialize_object_id(bv_id);
+
+        std::string pattern = ASIC_STATE_TABLE + std::string(":SAI_OBJECT_TYPE_FDB_ENTRY:*") + strBridgeVlanId + "*";
+        for (const auto &fdbkey: g_redisClient->keys(pattern))
+        {
+            /* we only remove dynamic fdb entries here, static fdb entries need to be deleted manually by user instead of flush */
+            auto pEntryType = g_redisClient->hget(fdbkey, "SAI_FDB_ENTRY_ATTR_TYPE");
+
+            if (pEntryType && *pEntryType == strEntryType)
+            {
+                SWSS_LOG_DEBUG("remove fdb entry %s for SAI_FDB_EVENT_FLUSHED",fdbkey.c_str());
+                g_redisClient->del(fdbkey);
+            }
+        }
+    }
+    else
+    {
+        SWSS_LOG_NOTICE("received a flush fdb event, port_oid = 0x%" PRIx64 ", bv_id = 0x%" PRIx64, port_oid, bv_id);
+
+        auto strBridgeVlanId = sai_serialize_object_id(bv_id);
+        auto strBridgePortId = sai_serialize_object_id(port_oid);
+
+        std::string pattern = ASIC_STATE_TABLE + std::string(":SAI_OBJECT_TYPE_FDB_ENTRY:*") + strBridgeVlanId + "*";
+        for (const auto &fdbkey: g_redisClient->keys(pattern))
+        {
+            /* we only remove dynamic fdb entries here, static fdb entries need to be deleted manually by user instead of flush */
+            auto pEntryType = g_redisClient->hget(fdbkey, "SAI_FDB_ENTRY_ATTR_TYPE");
+
+            if (pEntryType && *pEntryType == strEntryType)
+            {
+                auto bp = g_redisClient->hget(fdbkey, "SAI_FDB_ENTRY_ATTR_BRIDGE_PORT_ID");
+
+                if (bp && *bp == strBridgePortId)
+                {
+                    SWSS_LOG_DEBUG("remove fdb entry %s for SAI_FDB_EVENT_FLUSHED",fdbkey.c_str());
+                    g_redisClient->del(fdbkey);
+                }
+            }
+        }
+    }
+}
+
+
 void redisPutFdbEntryToAsicView(
         _In_ const sai_fdb_event_notification_data_t *fdb)
 {
@@ -106,159 +271,7 @@ void redisPutFdbEntryToAsicView(
 
     if (fdb->event_type == SAI_FDB_EVENT_FLUSHED)
     {
-        sai_object_id_t bv_id = fdb->fdb_entry.bv_id;
-        sai_object_id_t port_oid = 0;
-
-        sai_fdb_entry_type_t entryType = SAI_FDB_ENTRY_TYPE_DYNAMIC;
-
-        for (uint32_t i = 0; i < fdb->attr_count; i++)
-        {
-            if(fdb->attr[i].id == SAI_FDB_ENTRY_ATTR_BRIDGE_PORT_ID)
-            {
-                port_oid = fdb->attr[i].value.oid;
-            }
-
-            if (fdb->attr[i].id == SAI_FDB_ENTRY_ATTR_TYPE)
-            {
-                entryType = (sai_fdb_entry_type_t)fdb->attr[i].value.s32;
-            }
-        }
-
-        std::string strEntryType =
-            (entryType == SAI_FDB_ENTRY_TYPE_DYNAMIC)
-            ? "SAI_FDB_ENTRY_TYPE_DYNAMIC"
-            : "SAI_FDB_ENTRY_TYPE_STATIC";
-
-
-        if (!port_oid && !bv_id)
-        {
-            /* we got a flush all fdb event here */
-            /* example of a flush all fdb event   */
-            /*
-            [{
-            "fdb_entry":"{
-                \"bv_id\":\"oid:0x0\",
-                \"mac\":\"00:00:00:00:00:00\",
-                \"switch_id\":\"oid:0x21000000000000\"}",
-            "fdb_event":"SAI_FDB_EVENT_FLUSHED",
-                "list":[
-                    {"id":"SAI_FDB_ENTRY_ATTR_BRIDGE_PORT_ID","value":"oid:0x0"},
-                    {"id":"SAI_FDB_ENTRY_ATTR_TYPE","value":"SAI_FDB_ENTRY_TYPE_DYNAMIC"},
-                    {"id":"SAI_FDB_ENTRY_ATTR_PACKET_ACTION","value":"SAI_PACKET_ACTION_FORWARD"}
-                ]
-            }]
-            */
-            SWSS_LOG_NOTICE("received a flush all fdb event");
-            std::string pattern = ASIC_STATE_TABLE + std::string(":SAI_OBJECT_TYPE_FDB_ENTRY:*");
-            for (const auto &fdbkey: g_redisClient->keys(pattern))
-            {
-                /* we only remove dynamic fdb entries here, static fdb entries need to be deleted manually by user instead of flush */
-                auto pEntryType = g_redisClient->hget(fdbkey, "SAI_FDB_ENTRY_ATTR_TYPE");
-
-                if (pEntryType != NULL && *pEntryType == strEntryType)
-                {
-                    SWSS_LOG_DEBUG("remove fdb entry %s for SAI_FDB_EVENT_FLUSHED",fdbkey.c_str());
-                    g_redisClient->del(fdbkey);
-                }
-            }
-        }
-        else if (port_oid && !bv_id)
-        {
-            /*
-            [{
-            "fdb_entry":"{
-                \"bv_id\":\"oid:0x0\",
-                \"mac\":\"00:00:00:00:00:00\",
-                \"switch_id\":\"oid:0x21000000000000\"}",
-            "fdb_event":"SAI_FDB_EVENT_FLUSHED",
-                "list":[
-                    {"id":"SAI_FDB_ENTRY_ATTR_BRIDGE_PORT_ID","value":"oid:0x3a0000000009cf"},
-                    {"id":"SAI_FDB_ENTRY_ATTR_TYPE","value":"SAI_FDB_ENTRY_TYPE_DYNAMIC"},
-                    {"id":"SAI_FDB_ENTRY_ATTR_PACKET_ACTION","value":"SAI_PACKET_ACTION_FORWARD"}
-                ]
-            }]
-            */
-            SWSS_LOG_NOTICE("received a flush fdb event, port_oid = 0x%" PRIx64 ", bv_id = 0x%" PRIx64, port_oid, bv_id);
-
-            auto strBridgePortId = sai_serialize_object_id(port_oid);
-
-            std::string pattern = ASIC_STATE_TABLE + std::string(":SAI_OBJECT_TYPE_FDB_ENTRY:*");
-            for (const auto &fdbkey: g_redisClient->keys(pattern))
-            {
-                /* we only remove dynamic fdb entries here, static fdb entries need to be deleted manually by user instead of flush */
-                auto pEntryType = g_redisClient->hget(fdbkey, "SAI_FDB_ENTRY_ATTR_TYPE");
-
-                if (pEntryType && *pEntryType == strEntryType)
-                {
-                    auto bp = g_redisClient->hget(fdbkey, "SAI_FDB_ENTRY_ATTR_BRIDGE_PORT_ID");
-
-                    if (bp && *bp == strBridgePortId)
-                    {
-                        SWSS_LOG_DEBUG("remove fdb entry %s for SAI_FDB_EVENT_FLUSHED",fdbkey.c_str());
-                        g_redisClient->del(fdbkey);
-                    }
-                }
-            }
-        }
-        else if (!port_oid && bv_id)
-        {
-            /*
-            [{
-            "fdb_entry":"{
-                \"bridge_id\":\"oid:0x23000000000000\",
-                \"mac\":\"00:00:00:00:00:00\",
-                \"switch_id\":\"oid:0x21000000000000\"}",
-            "fdb_event":"SAI_FDB_EVENT_FLUSHED",
-                "list":[
-                    {"id":"SAI_FDB_ENTRY_ATTR_BRIDGE_PORT_ID","value":"oid:0x0"},
-                    {"id":"SAI_FDB_ENTRY_ATTR_TYPE","value":"SAI_FDB_ENTRY_TYPE_DYNAMIC"},
-                    {"id":"SAI_FDB_ENTRY_ATTR_PACKET_ACTION","value":"SAI_PACKET_ACTION_FORWARD"}
-                ]
-            }]
-            */
-            SWSS_LOG_NOTICE("received a flush fdb event, port_oid = 0x%" PRIx64 ", bv_id = 0x%" PRIx64, port_oid, bv_id);
-
-            auto strBridgeVlanId = sai_serialize_object_id(bv_id);
-
-            std::string pattern = ASIC_STATE_TABLE + std::string(":SAI_OBJECT_TYPE_FDB_ENTRY:*") + strBridgeVlanId + "*";
-            for (const auto &fdbkey: g_redisClient->keys(pattern))
-            {
-                /* we only remove dynamic fdb entries here, static fdb entries need to be deleted manually by user instead of flush */
-                auto pEntryType = g_redisClient->hget(fdbkey, "SAI_FDB_ENTRY_ATTR_TYPE");
-
-                if (pEntryType && *pEntryType == strEntryType)
-                {
-                    SWSS_LOG_DEBUG("remove fdb entry %s for SAI_FDB_EVENT_FLUSHED",fdbkey.c_str());
-                    g_redisClient->del(fdbkey);
-                }
-            }
-        }
-        else
-        {
-            SWSS_LOG_NOTICE("received a flush fdb event, port_oid = 0x%" PRIx64 ", bv_id = 0x%" PRIx64, port_oid, bv_id);
-
-            auto strBridgeVlanId = sai_serialize_object_id(bv_id);
-            auto strBridgePortId = sai_serialize_object_id(port_oid);
-
-            std::string pattern = ASIC_STATE_TABLE + std::string(":SAI_OBJECT_TYPE_FDB_ENTRY:*") + strBridgeVlanId + "*";
-            for (const auto &fdbkey: g_redisClient->keys(pattern))
-            {
-                /* we only remove dynamic fdb entries here, static fdb entries need to be deleted manually by user instead of flush */
-                auto pEntryType = g_redisClient->hget(fdbkey, "SAI_FDB_ENTRY_ATTR_TYPE");
-
-                if (pEntryType && *pEntryType == strEntryType)
-                {
-                    auto bp = g_redisClient->hget(fdbkey, "SAI_FDB_ENTRY_ATTR_BRIDGE_PORT_ID");
-
-                    if (bp && *bp == strBridgePortId)
-                    {
-                        SWSS_LOG_DEBUG("remove fdb entry %s for SAI_FDB_EVENT_FLUSHED",fdbkey.c_str());
-                        g_redisClient->del(fdbkey);
-                    }
-                }
-            }
-        }
-
+        redisFlushFdbEntries(fdb);
         return;
     }
 
@@ -335,7 +348,7 @@ bool check_fdb_event_notification_data(
 
     bool result = true;
 
-    if (!check_rid_exists(data.fdb_entry.bv_id))
+    if (!check_rid_exists(data.fdb_entry.bv_id, true))
     {
         SWSS_LOG_ERROR("bv_id RID 0x%" PRIx64 " is not present on local ASIC DB: %s", data.fdb_entry.bv_id,
                 sai_serialize_fdb_entry(data.fdb_entry).c_str());
@@ -367,7 +380,7 @@ bool check_fdb_event_notification_data(
         if (meta->attrvaluetype != SAI_ATTR_VALUE_TYPE_OBJECT_ID)
             continue;
 
-        if (!check_rid_exists(attr.value.oid))
+        if (!check_rid_exists(attr.value.oid, true))
         {
             SWSS_LOG_WARN("RID 0x%" PRIx64 " on %s is not present on local ASIC DB", attr.value.oid, meta->attridname);
 
@@ -421,9 +434,9 @@ void process_on_fdb_event(
 
         fdb->fdb_entry.switch_id = translate_rid_to_vid(fdb->fdb_entry.switch_id, SAI_NULL_OBJECT_ID);
 
-        fdb->fdb_entry.bv_id = translate_rid_to_vid(fdb->fdb_entry.bv_id, fdb->fdb_entry.switch_id);
+        fdb->fdb_entry.bv_id = translate_rid_to_vid(fdb->fdb_entry.bv_id, fdb->fdb_entry.switch_id, true);
 
-        translate_rid_to_vid_list(SAI_OBJECT_TYPE_FDB_ENTRY, fdb->fdb_entry.switch_id, fdb->attr_count, fdb->attr);
+        translate_rid_to_vid_list(SAI_OBJECT_TYPE_FDB_ENTRY, fdb->fdb_entry.switch_id, fdb->attr_count, fdb->attr, true);
 
         /*
          * Currently because of brcm bug, we need to install fdb entries in

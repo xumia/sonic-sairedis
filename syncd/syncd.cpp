@@ -328,6 +328,8 @@ sai_object_id_t redis_create_virtual_object_id(
 std::unordered_map<sai_object_id_t, sai_object_id_t> local_rid_to_vid;
 std::unordered_map<sai_object_id_t, sai_object_id_t> local_vid_to_rid;
 
+std::unordered_map<sai_object_id_t, sai_object_id_t> g_removed_rid_to_vid;
+
 void save_rid_and_vid_to_local(
         _In_ sai_object_id_t rid,
         _In_ sai_object_id_t vid)
@@ -346,6 +348,8 @@ void remove_rid_and_vid_from_local(
 
     local_rid_to_vid.erase(rid);
     local_vid_to_rid.erase(vid);
+
+    g_removed_rid_to_vid[rid] = vid;
 }
 
 /*
@@ -356,7 +360,8 @@ void remove_rid_and_vid_from_local(
  */
 sai_object_id_t translate_rid_to_vid(
         _In_ sai_object_id_t rid,
-        _In_ sai_object_id_t switch_vid)
+        _In_ sai_object_id_t switch_vid,
+        _In_ bool translateRemoved)
 {
     SWSS_LOG_ENTER();
 
@@ -398,6 +403,20 @@ sai_object_id_t translate_rid_to_vid(
         SWSS_LOG_DEBUG("translated RID 0x%" PRIx64 " to VID 0x%" PRIx64, rid, vid);
 
         return vid;
+    }
+
+    if (translateRemoved)
+    {
+        auto itr = g_removed_rid_to_vid.find(rid);
+
+        if (itr != g_removed_rid_to_vid.end())
+        {
+            SWSS_LOG_WARN("translating removed RID %s, to VID %s",
+                    sai_serialize_object_id(rid).c_str(),
+                    sai_serialize_object_id(itr->second).c_str());
+
+            return itr->second;
+        }
     }
 
     SWSS_LOG_DEBUG("spotted new RID 0x%" PRIx64, rid);
@@ -447,7 +466,8 @@ sai_object_id_t translate_rid_to_vid(
  * @return True if exists or SAI_NULL_OBJECT_ID, otherwise false.
  */
 bool check_rid_exists(
-        _In_ sai_object_id_t rid)
+        _In_ sai_object_id_t rid,
+        _In_ bool checkRemoved)
 {
     SWSS_LOG_ENTER();
 
@@ -464,18 +484,25 @@ bool check_rid_exists(
     if (pvid != NULL)
         return true;
 
+    if (checkRemoved && (g_removed_rid_to_vid.find(rid) != g_removed_rid_to_vid.end()))
+    {
+        SWSS_LOG_WARN("removed RID %s exists", sai_serialize_object_id(rid).c_str());
+        return true;
+    }
+
     return false;
 }
 
 void translate_list_rid_to_vid(
         _In_ sai_object_list_t &element,
-        _In_ sai_object_id_t switch_id)
+        _In_ sai_object_id_t switch_id,
+        _In_ bool translateRemoved)
 {
     SWSS_LOG_ENTER();
 
     for (uint32_t i = 0; i < element.count; i++)
     {
-        element.list[i] = translate_rid_to_vid(element.list[i], switch_id);
+        element.list[i] = translate_rid_to_vid(element.list[i], switch_id, translateRemoved);
     }
 }
 
@@ -489,7 +516,8 @@ void translate_rid_to_vid_list(
         _In_ sai_object_type_t object_type,
         _In_ sai_object_id_t switch_id,
         _In_ uint32_t attr_count,
-        _In_ sai_attribute_t *attr_list)
+        _In_ sai_attribute_t *attr_list,
+        _In_ bool translateRemoved)
 {
     SWSS_LOG_ENTER();
 
@@ -520,31 +548,31 @@ void translate_rid_to_vid_list(
         switch (meta->attrvaluetype)
         {
             case SAI_ATTR_VALUE_TYPE_OBJECT_ID:
-                attr.value.oid = translate_rid_to_vid(attr.value.oid, switch_id);
+                attr.value.oid = translate_rid_to_vid(attr.value.oid, switch_id, translateRemoved);
                 break;
 
             case SAI_ATTR_VALUE_TYPE_OBJECT_LIST:
-                translate_list_rid_to_vid(attr.value.objlist, switch_id);
+                translate_list_rid_to_vid(attr.value.objlist, switch_id, translateRemoved);
                 break;
 
             case SAI_ATTR_VALUE_TYPE_ACL_FIELD_DATA_OBJECT_ID:
                 if (attr.value.aclfield.enable)
-                    attr.value.aclfield.data.oid = translate_rid_to_vid(attr.value.aclfield.data.oid, switch_id);
+                    attr.value.aclfield.data.oid = translate_rid_to_vid(attr.value.aclfield.data.oid, switch_id, translateRemoved);
                 break;
 
             case SAI_ATTR_VALUE_TYPE_ACL_FIELD_DATA_OBJECT_LIST:
                 if (attr.value.aclfield.enable)
-                    translate_list_rid_to_vid(attr.value.aclfield.data.objlist, switch_id);
+                    translate_list_rid_to_vid(attr.value.aclfield.data.objlist, switch_id, translateRemoved);
                 break;
 
             case SAI_ATTR_VALUE_TYPE_ACL_ACTION_DATA_OBJECT_ID:
                 if (attr.value.aclaction.enable)
-                    attr.value.aclaction.parameter.oid = translate_rid_to_vid(attr.value.aclaction.parameter.oid, switch_id);
+                    attr.value.aclaction.parameter.oid = translate_rid_to_vid(attr.value.aclaction.parameter.oid, switch_id, translateRemoved);
                 break;
 
             case SAI_ATTR_VALUE_TYPE_ACL_ACTION_DATA_OBJECT_LIST:
                 if (attr.value.aclaction.enable)
-                    translate_list_rid_to_vid(attr.value.aclaction.parameter.objlist, switch_id);
+                    translate_list_rid_to_vid(attr.value.aclaction.parameter.objlist, switch_id, translateRemoved);
                 break;
 
             default:
@@ -2025,6 +2053,7 @@ sai_status_t notifySyncd(
 
             local_rid_to_vid.clear();
             local_vid_to_rid.clear();
+            g_removed_rid_to_vid.clear();
         }
         else
         {
@@ -2845,6 +2874,9 @@ sai_status_t processBulkEvent(
     return status;
 }
 
+void redisFlushFdbEntries(
+        _In_ const sai_fdb_event_notification_data_t *fdb);
+
 sai_status_t processFdbFlush(
         _In_ const swss::KeyOpFieldsValuesTuple &kco)
 {
@@ -2867,6 +2899,7 @@ sai_status_t processFdbFlush(
     }
 
     SaiAttributeList list(SAI_OBJECT_TYPE_FDB_FLUSH, values, false);
+    SaiAttributeList vidlist(SAI_OBJECT_TYPE_FDB_FLUSH, values, false);
 
     /*
      * Attribute list can't be const since we will use it to translate VID to
@@ -2883,6 +2916,83 @@ sai_status_t processFdbFlush(
     std::vector<swss::FieldValueTuple> en;
 
     getResponse->set(sai_serialize_status(status), en, "flushresponse");
+
+    if (status == SAI_STATUS_SUCCESS)
+    {
+        SWSS_LOG_NOTICE("fdb flush succeeded, updating redis database");
+
+        // update database right after fdb flush success (not in notification)
+        // build artificial notification here to reuse code
+
+        sai_fdb_event_notification_data_t data;
+        memset(&data, 0, sizeof(data));
+
+        sai_attribute_t attrs[2];
+
+        attrs[0].id = SAI_FDB_ENTRY_ATTR_TYPE;
+        attrs[0].value.s32 = SAI_FDB_ENTRY_TYPE_DYNAMIC;
+
+        attrs[1].id = SAI_FDB_ENTRY_ATTR_BRIDGE_PORT_ID;
+        attrs[1].value.oid = SAI_NULL_OBJECT_ID;
+
+        data.event_type = SAI_FDB_EVENT_FLUSHED;
+
+        data.fdb_entry.switch_id = switch_vid;
+
+        data.attr_count = 2;
+        data.attr = attrs;
+
+        sai_fdb_flush_entry_type_t type = SAI_FDB_FLUSH_ENTRY_TYPE_DYNAMIC;
+
+        attr_list = vidlist.get_attr_list();
+        attr_count = vidlist.get_attr_count();
+
+        for (uint32_t i = 0; i < attr_count; i++)
+        {
+            switch (attr_list[i].id)
+            {
+                case SAI_FDB_FLUSH_ATTR_BRIDGE_PORT_ID:
+                    attrs[1].value.oid = attr_list[i].value.oid;
+                    break;
+
+                case SAI_FDB_FLUSH_ATTR_BV_ID:
+                    data.fdb_entry.bv_id = attr_list[i].value.oid;
+                    break;
+
+                case SAI_FDB_FLUSH_ATTR_ENTRY_TYPE:
+                    type = (sai_fdb_flush_entry_type_t)attr_list[i].value.s32;
+                    break;
+
+                default:
+                    SWSS_LOG_ERROR("unsupported attribute: %d, skipping", attr_list[i].id);
+                    break;
+            }
+        }
+
+        switch (type)
+        {
+            case SAI_FDB_FLUSH_ENTRY_TYPE_DYNAMIC:
+
+                attrs[0].value.s32 = SAI_FDB_ENTRY_TYPE_DYNAMIC;
+                redisFlushFdbEntries(&data);
+                break;
+
+            case SAI_FDB_FLUSH_ENTRY_TYPE_STATIC:
+
+                attrs[0].value.s32 = SAI_FDB_ENTRY_TYPE_STATIC;
+                redisFlushFdbEntries(&data);
+                break;
+
+            case SAI_FDB_FLUSH_ENTRY_TYPE_ALL:
+
+                attrs[0].value.s32 = SAI_FDB_ENTRY_TYPE_DYNAMIC;
+                redisFlushFdbEntries(&data);
+
+                attrs[0].value.s32 = SAI_FDB_ENTRY_TYPE_STATIC;
+                redisFlushFdbEntries(&data);
+                break;
+        }
+    }
 
     return status;
 }
